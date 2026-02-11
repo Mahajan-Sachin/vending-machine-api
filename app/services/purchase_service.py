@@ -1,31 +1,48 @@
-import time
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.models import Item
-
+from sqlalchemy import and_
+from app.models import Item, Slot
 
 def purchase(db: Session, item_id: str, cash_inserted: int) -> dict:
     item = db.query(Item).filter(Item.id == item_id).first()
     if not item:
         raise ValueError("item_not_found")
-    time.sleep(0.05)  # demo: widens race window for concurrent purchase/restock
-    if item.quantity <= 0:
-        raise ValueError("out_of_stock")
+
     if cash_inserted < item.price:
         raise ValueError("insufficient_cash", item.price, cash_inserted)
-    # No validation that cash_inserted or change use SUPPORTED_DENOMINATIONS
-    change = cash_inserted - item.price
-    item.quantity -= 1
-    item.slot.current_item_count -= 1
+
+    slot_id = item.slot_id
+    price = item.price
+
+    # Atomic item update
+    updated_rows = (
+        db.query(Item)
+        .filter(and_(Item.id == item_id, Item.quantity > 0))
+        .update({Item.quantity: Item.quantity - 1}, synchronize_session=False)
+    )
+
+    if updated_rows == 0:
+        raise ValueError("out_of_stock")
+
+    # Atomic slot update
+    db.query(Slot).filter(Slot.id == slot_id).update(
+        {Slot.current_item_count: Slot.current_item_count - 1},
+        synchronize_session=False
+    )
+
     db.commit()
-    db.refresh(item)
+
+    updated_item = db.query(Item).filter(Item.id == item_id).first()
+
+    change = cash_inserted - price
+
     return {
-        "item": item.name,
-        "price": item.price,
+        "item": updated_item.name,
+        "price": price,
         "cash_inserted": cash_inserted,
         "change_returned": change,
-        "remaining_quantity": item.quantity,
+        "remaining_quantity": updated_item.quantity,
         "message": "Purchase successful",
     }
 
